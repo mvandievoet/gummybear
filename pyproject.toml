@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gummybear"
+version = "0.1.0"
+description = "Sleeper Casio W-218H GPS + BLE Heart Rate watch telemetry pipeline & Strava uploader"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+ble = ["bleak>=0.21.0", "pyserial>=3.5"]
+analytics = ["duckdb>=0.10.0"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+gummybear = "gummybear.cli:main"

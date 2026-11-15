@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+data/
+*.db
+*.duckdb
+*.duckdb.wal
+*.fit
+*.gpx
+*.gmy
+.DS_Store
