@@ -5,6 +5,7 @@
 #include "../include/ble_hr_parser.h"
 #include "../include/gummybear_protocol.h"
 #include "../include/nmea_parser.h"
+#include "../include/timezone_dst.h"
 #include "../include/watch_state.h"
 
 static void feed_str(NmeaGpsState *gps, const char *s) {
@@ -102,10 +103,29 @@ static void test_nmea_and_session_export(const char *dump_path) {
     }
 }
 
+static void test_dst_transitions(void) {
+    LocalDateTime ldt;
+    // SF in July (PDT = UTC-7): 2026-07-15 15:00 UTC -> 08:00 local, DST=true
+    utc_to_local_datetime(utc_to_unix_ts(2026, 7, 15, 15, 0, 0), 0, &ldt);
+    assert(ldt.is_dst == true);
+    assert(ldt.hour == 8);
+
+    // SF in November after Fall Back (PST = UTC-8): 2026-11-15 15:00 UTC -> 07:00 local, DST=false
+    utc_to_local_datetime(utc_to_unix_ts(2026, 11, 15, 15, 0, 0), 0, &ldt);
+    assert(ldt.is_dst == false);
+    assert(ldt.hour == 7);
+
+    // Brussels in June (CEST = UTC+2): 2027-06-10 12:00 UTC -> 14:00 local, DST=true
+    utc_to_local_datetime(utc_to_unix_ts(2027, 6, 10, 12, 0, 0), 5, &ldt);
+    assert(ldt.is_dst == true);
+    assert(ldt.hour == 14);
+}
+
 int main(int argc, char **argv) {
     const char *dump_path = (argc > 1) ? argv[1] : NULL;
     test_struct_packing();
     test_garmin_ble_hr_parser();
+    test_dst_transitions();
     test_nmea_and_session_export(dump_path);
     printf("All C firmware tests passed!\n");
     return 0;
