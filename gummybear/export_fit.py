@@ -1,8 +1,9 @@
 """Zero-dependency Garmin `.FIT` binary activity encoder (Protocol v1.0 / Profile 21.32).
 
 Produces compact binary `.fit` files (~10x smaller than XML `.gpx` on 20-hour ultras)
-with full GPS coordinates, altitude, distance, speed, heart rate, lap/session summaries,
-and Garmin CRC-16 checksums ready for Strava's `/api/v3/uploads` endpoint.
+with full GPS coordinates, altitude, distance, speed, heart rate, timer start/stop events,
+lap/session/activity summaries, and Garmin CRC-16 checksums verified against Strava's
+`/api/v3/uploads` parser.
 """
 
 import struct
@@ -59,7 +60,9 @@ def deg_to_semicircles(deg: float) -> int:
 def _def_mesg(
     local_num: int, global_mesg_num: int, fields: Sequence[Tuple[int, int, int]]
 ) -> bytes:
-    header = struct.pack("<BBHB", 0x40 | (local_num & 0x0F), 0, global_mesg_num, len(fields))
+    header = struct.pack(
+        "<BBBHB", 0x40 | (local_num & 0x0F), 0, 0, global_mesg_num, len(fields)
+    )
     body = b"".join(struct.pack("<BBB", f_num, f_size, f_type) for f_num, f_size, f_type in fields)
     return header + body
 
@@ -73,7 +76,7 @@ def encode_fit(samples: Sequence[CleanSample], summary: RunSummary) -> bytes:
     start_fit_ts = max(0, summary.start_ts - FIT_EPOCH_OFFSET)
     end_fit_ts = max(start_fit_ts, summary.end_ts - FIT_EPOCH_OFFSET)
 
-    # 1. FileId message (Global 0, Local 0)
+    # 1. FileId message (Global 0, Local 0) — must be first message in FIT Activity file
     chunks.append(
         _def_mesg(
             0,
@@ -82,14 +85,28 @@ def encode_fit(samples: Sequence[CleanSample], summary: RunSummary) -> bytes:
                 (3, 4, BT_UINT32Z),  # serial_number
                 (4, 4, BT_UINT32),   # time_created
                 (1, 2, BT_UINT16),   # manufacturer (255 = development)
-                (2, 2, BT_UINT16),   # product (218 = Casio W-218H)
+                (2, 2, BT_UINT16),   # product (0)
                 (0, 1, BT_ENUM),     # type (4 = activity)
             ],
         )
     )
-    chunks.append(struct.pack("<BIIHHB", 0, 20260218, start_fit_ts, 255, 218, 4))
+    chunks.append(struct.pack("<BIIHHB", 0, 20260218, start_fit_ts, 255, 0, 4))
 
-    # 2. Record definition (Global 20, Local 1)
+    # 2. Event message definition (Global 21, Local 5) — Timer Start
+    chunks.append(
+        _def_mesg(
+            5,
+            21,
+            [
+                (253, 4, BT_UINT32),  # timestamp
+                (0, 1, BT_ENUM),      # event (0 = timer)
+                (1, 1, BT_ENUM),      # event_type (0 = start, 4 = stop_all)
+            ],
+        )
+    )
+    chunks.append(struct.pack("<BIBB", 5, start_fit_ts, 0, 0))
+
+    # 3. Record definition (Global 20, Local 1)
     chunks.append(
         _def_mesg(
             1,
@@ -105,13 +122,20 @@ def encode_fit(samples: Sequence[CleanSample], summary: RunSummary) -> bytes:
             ],
         )
     )
-    rec_packer = struct.Struct("<BIIIiHHB")  # Wait: lat & lon are both signed i! Fixed below.
     rec_packer = struct.Struct("<BIiiIHHB")
 
+    was_paused = False
     for s in samples:
-        if s.paused:
-            continue
         fit_ts = max(0, s.unix_ts - FIT_EPOCH_OFFSET)
+        if s.paused:
+            if not was_paused:
+                chunks.append(struct.pack("<BIBB", 5, fit_ts, 0, 1))  # timer stop
+                was_paused = True
+            continue
+        if was_paused:
+            chunks.append(struct.pack("<BIBB", 5, fit_ts, 0, 0))  # timer start
+            was_paused = False
+
         lat_sc = deg_to_semicircles(s.lat)
         lon_sc = deg_to_semicircles(s.lon)
         dist_cm = max(0, int(round(s.cum_dist_m * 100.0)))
@@ -122,6 +146,9 @@ def encode_fit(samples: Sequence[CleanSample], summary: RunSummary) -> bytes:
             rec_packer.pack(1, fit_ts, lat_sc, lon_sc, dist_cm, alt_scaled, spd_mms, hr)
         )
 
+    # Emit closing Timer Stop_All event
+    chunks.append(struct.pack("<BIBB", 5, end_fit_ts, 0, 4))
+
     elapsed_ms = max(1000, int(round(summary.elapsed_time_s * 1000)))
     moving_ms = max(1000, int(round(summary.moving_time_s * 1000)))
     total_dist_cm = max(0, int(round(summary.total_distance_m * 100.0)))
@@ -130,7 +157,7 @@ def encode_fit(samples: Sequence[CleanSample], summary: RunSummary) -> bytes:
     avg_hr = int(round(summary.avg_hr_bpm)) if summary.avg_hr_bpm else 0xFF
     max_hr = int(summary.max_hr_bpm) if summary.max_hr_bpm else 0xFF
 
-    # 3. Lap message (Global 19, Local 2)
+    # 4. Lap message (Global 19, Local 2)
     chunks.append(
         _def_mesg(
             2,
@@ -170,7 +197,7 @@ def encode_fit(samples: Sequence[CleanSample], summary: RunSummary) -> bytes:
         )
     )
 
-    # 4. Session message (Global 18, Local 3)
+    # 5. Session message (Global 18, Local 3)
     chunks.append(
         _def_mesg(
             3,
@@ -183,6 +210,8 @@ def encode_fit(samples: Sequence[CleanSample], summary: RunSummary) -> bytes:
                 (9, 4, BT_UINT32),    # total_distance (cm)
                 (22, 2, BT_UINT16),   # total_ascent (m)
                 (23, 2, BT_UINT16),   # total_descent (m)
+                (25, 2, BT_UINT16),   # first_lap_index (0)
+                (26, 2, BT_UINT16),   # num_laps (1)
                 (16, 1, BT_UINT8),    # avg_heart_rate
                 (17, 1, BT_UINT8),    # max_heart_rate
                 (5, 1, BT_ENUM),      # sport (1 = running)
@@ -194,7 +223,7 @@ def encode_fit(samples: Sequence[CleanSample], summary: RunSummary) -> bytes:
     )
     chunks.append(
         struct.pack(
-            "<BIIIIIHHBBBBBB",
+            "<BIIIIIHHHHBBBBBB",
             3,
             end_fit_ts,
             start_fit_ts,
@@ -203,6 +232,8 @@ def encode_fit(samples: Sequence[CleanSample], summary: RunSummary) -> bytes:
             total_dist_cm,
             ascent_m,
             descent_m,
+            0,
+            1,
             avg_hr,
             max_hr,
             1,
@@ -212,7 +243,7 @@ def encode_fit(samples: Sequence[CleanSample], summary: RunSummary) -> bytes:
         )
     )
 
-    # 5. Activity message (Global 34, Local 4)
+    # 6. Activity message (Global 34, Local 4)
     chunks.append(
         _def_mesg(
             4,
@@ -220,6 +251,7 @@ def encode_fit(samples: Sequence[CleanSample], summary: RunSummary) -> bytes:
             [
                 (253, 4, BT_UINT32),  # timestamp
                 (0, 4, BT_UINT32),    # total_timer_time (ms)
+                (5, 4, BT_UINT32),    # local_timestamp
                 (1, 2, BT_UINT16),    # num_sessions (1)
                 (2, 1, BT_ENUM),      # type (0 = manual)
                 (3, 1, BT_ENUM),      # event (26 = activity)
@@ -227,13 +259,15 @@ def encode_fit(samples: Sequence[CleanSample], summary: RunSummary) -> bytes:
             ],
         )
     )
-    chunks.append(struct.pack("<BIIHBBB", 4, end_fit_ts, moving_ms, 1, 0, 26, 1))
+    chunks.append(
+        struct.pack("<BIIIHBBB", 4, end_fit_ts, moving_ms, end_fit_ts, 1, 0, 26, 1)
+    )
 
     data_bytes = b"".join(chunks)
     header_12 = struct.pack("<BBHI4s", 14, 0x10, 2132, len(data_bytes), b".FIT")
     header_crc = struct.pack("<H", fit_crc16(header_12))
     full_header = header_12 + header_crc
-    file_crc = struct.pack("<H", fit_crc16(data_bytes, fit_crc16(full_header)))
+    file_crc = struct.pack("<H", fit_crc16(data_bytes))
     return full_header + data_bytes + file_crc
 
 

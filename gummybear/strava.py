@@ -159,8 +159,8 @@ def _build_multipart(
 
 def upload_activity_to_strava(
     activity_file: Path,
-    name: str,
-    description: str = "",
+    name: Optional[str] = None,
+    description: Optional[str] = None,
     external_id: Optional[str] = None,
     token_path: Path = DEFAULT_TOKEN_PATH,
     poll_seconds: int = 25,
@@ -171,12 +171,14 @@ def upload_activity_to_strava(
     if suffix not in ("fit", "gpx"):
         raise ValueError(f"Unsupported Strava upload extension .{suffix}; expected .fit or .gpx")
 
-    fields = {
+    fields: Dict[str, str] = {
         "data_type": suffix,
         "activity_type": "run",
-        "name": name,
-        "description": description,
     }
+    if name:
+        fields["name"] = name
+    if description:
+        fields["description"] = description
     if external_id:
         fields["external_id"] = external_id
 

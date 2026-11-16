@@ -14,6 +14,7 @@ from gummybear.metrics import format_pace, summarize_run
 from gummybear.models import RunSummary
 from gummybear.simulator import generate_synthetic_sf_run
 from gummybear.storage import RunWarehouse
+from gummybear.sync import pull_runs_over_usb_serial
 from gummybear.strava import (
     DEFAULT_TOKEN_PATH,
     authorize_interactive,
@@ -159,17 +160,10 @@ def cmd_upload(args: argparse.Namespace) -> int:
         print(f"Export file missing at {upload_file}")
         return 1
 
-    desc = (
-        f"Recorded on DIY Casio W-218H (Gummybear) | "
-        f"GAP {format_pace(float(row['avg_gap_sec_per_km']))}"
-    )
-    if row["aerobic_decoupling_pct"] is not None:
-        desc += f" | Pa:Hr {float(row['aerobic_decoupling_pct']):+.1f}%"
-
     res = upload_activity_to_strava(
         activity_file=upload_file,
         name=args.name,
-        description=desc,
+        description=args.description,
         external_id=f"gummybear_{str(row['source_sha256'])[:16]}",
         token_path=Path(args.token_file),
     )
@@ -186,6 +180,39 @@ def cmd_upload(args: argparse.Namespace) -> int:
         print(f"Uploaded to Strava: https://www.strava.com/activities/{res.activity_id}")
     else:
         print(f"Queued on Strava (upload_id={res.upload_id}, status={res.status})")
+    return 0
+
+
+def cmd_sync(args: argparse.Namespace) -> int:
+    raw_dir = Path(args.db).parent / "raw"
+    pulled = pull_runs_over_usb_serial(
+        output_dir=raw_dir,
+        port=args.port,
+        delete_after_verify=not args.keep_on_watch,
+    )
+    if not pulled:
+        print("Watch connected — no new runs on flash.")
+        return 0
+
+    for gmy_path in pulled:
+        ingest_ns = argparse.Namespace(
+            db=args.db, file=str(gmy_path), name="Casio W-218H Run"
+        )
+        cmd_ingest(ingest_ns)
+        if args.upload:
+            db = RunWarehouse(Path(args.db))
+            runs = db.list_runs()
+            if runs:
+                latest_id = int(runs[0]["id"])
+                up_ns = argparse.Namespace(
+                    db=args.db,
+                    run_id=latest_id,
+                    name=None,
+                    description=None,
+                    format="fit",
+                    token_file=args.token_file,
+                )
+                cmd_upload(up_ns)
     return 0
 
 
@@ -219,10 +246,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_up = sub.add_parser("upload", help="Upload a stored run to Strava (.fit default)")
     p_up.add_argument("run_id", type=int)
-    p_up.add_argument("--name", default="Morning Run (Casio W-218H)")
+    p_up.add_argument("--name", default=None, help="Optional title (if omitted, Strava uses Morning/Afternoon/Evening Run)")
+    p_up.add_argument("--description", default=None, help="Optional Strava description (blank by default)")
     p_up.add_argument("--format", choices=["fit", "gpx"], default="fit")
     p_up.add_argument("--token-file", default=str(DEFAULT_TOKEN_PATH))
     p_up.set_defaults(func=cmd_upload)
+
+    p_sync = sub.add_parser("sync", help="Pull `.gmy` runs from USB-connected watch, ingest, and optionally upload")
+    p_sync.add_argument("--port", default=None, help="Serial port (auto-detects /dev/cu.usbmodem* if omitted)")
+    p_sync.add_argument("--keep-on-watch", action="store_true", help="Do not delete synced files from watch flash")
+    p_sync.add_argument("--upload", action="store_true", help="Automatically upload newly synced runs to Strava")
+    p_sync.add_argument("--token-file", default=str(DEFAULT_TOKEN_PATH))
+    p_sync.set_defaults(func=cmd_sync)
 
     return parser
 

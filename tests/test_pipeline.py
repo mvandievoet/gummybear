@@ -1,3 +1,4 @@
+import subprocess
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -74,6 +75,22 @@ class TestBinaryProtocol(unittest.TestCase):
         self.assertTrue(header.is_unclosed)
         self.assertEqual(len(recovered), 10)
         self.assertEqual(dropped, 1)
+
+    def test_c_firmware_headers_compile_and_static_assert(self) -> None:
+        repo_root = Path(__file__).resolve().parent.parent
+        c_test_src = repo_root / "firmware" / "tests" / "test_firmware.c"
+        subprocess.run(
+            [
+                "clang",
+                "-std=c11",
+                "-fsyntax-only",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                str(c_test_src),
+            ],
+            check=True,
+        )
 
 
 class TestKalmanAndMetrics(unittest.TestCase):
