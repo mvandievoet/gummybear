@@ -11,7 +11,7 @@ from gummybear.export_fit import write_fit_file
 from gummybear.export_gpx import write_gpx_file
 from gummybear.kalman import clean_trajectory
 from gummybear.metrics import format_pace, summarize_run
-from gummybear.models import RunSummary
+from gummybear.models import HrvMetrics, RunSummary, Split
 from gummybear.simulator import generate_synthetic_sf_run
 from gummybear.storage import RunWarehouse
 from gummybear.sync import pull_runs_over_usb_serial
@@ -137,6 +137,54 @@ def cmd_runs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_show(args: argparse.Namespace) -> int:
+    db = RunWarehouse(Path(args.db))
+    row = db.get_run(args.run_id)
+    if not row:
+        print(f"Run #{args.run_id} not found in {args.db}")
+        return 1
+
+    splits_raw = json.loads(str(row["splits_json"]))
+    splits = [Split(**sp) for sp in splits_raw]
+    hrv = HrvMetrics(
+        valid_rr_count=int(row["hrv_valid_rr_count"]),
+        rejected_rr_count=0,
+        mean_rr_ms=None,
+        sdnn_ms=float(row["hrv_sdnn_ms"]) if row["hrv_sdnn_ms"] is not None else None,
+        rmssd_ms=float(row["hrv_rmssd_ms"]) if row["hrv_rmssd_ms"] is not None else None,
+    )
+    summary = RunSummary(
+        source_sha256=str(row["source_sha256"]),
+        start_ts=int(row["start_ts"]),
+        end_ts=int(row["end_ts"]),
+        elapsed_time_s=int(row["elapsed_time_s"]),
+        moving_time_s=int(row["moving_time_s"]),
+        total_distance_m=float(row["total_distance_m"]),
+        elev_gain_m=float(row["elev_gain_m"]),
+        elev_loss_m=float(row["elev_loss_m"]),
+        avg_pace_sec_per_km=float(row["avg_pace_sec_per_km"]),
+        avg_gap_sec_per_km=float(row["avg_gap_sec_per_km"]),
+        avg_hr_bpm=float(row["avg_hr_bpm"]) if row["avg_hr_bpm"] is not None else None,
+        max_hr_bpm=int(row["max_hr_bpm"]) if row["max_hr_bpm"] is not None else None,
+        aerobic_decoupling_pct=(
+            float(row["aerobic_decoupling_pct"])
+            if row["aerobic_decoupling_pct"] is not None
+            else None
+        ),
+        hrv=hrv,
+        start_batt_mv=int(row["start_batt_mv"]),
+        splits=splits,
+    )
+    _print_summary(
+        int(row["id"]),
+        summary,
+        created_new=True,
+        fit_path=Path(str(row["fit_path"] or "")),
+        gpx_path=Path(str(row["gpx_path"] or "")),
+    )
+    return 0
+
+
 def cmd_strava_auth(args: argparse.Namespace) -> int:
     saved = authorize_interactive(
         client_id=args.client_id,
@@ -236,6 +284,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_runs = sub.add_parser("runs", help="List ingested runs in the local warehouse")
     p_runs.set_defaults(func=cmd_runs)
+
+    p_show = sub.add_parser("show", help="Show full local splits, GAP, Pa:Hr drift, and HRV for a run")
+    p_show.add_argument("run_id", type=int)
+    p_show.set_defaults(func=cmd_show)
 
     p_auth = sub.add_parser("strava-auth", help="One-time OAuth2 setup with your Strava API app")
     p_auth.add_argument("--client-id", required=True)

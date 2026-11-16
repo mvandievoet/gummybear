@@ -8,7 +8,7 @@ This guide walks through how we are turning a regular **Casio W-218H** casual di
 
 We want a watch that feels and looks like a simple everyday Casio on the wrist (~`42 g`, no touchscreen menus or phone notifications), while doing the three things that actually matter on a run:
 1. **Track GPS route, distance, and live pace** without carrying a phone.
-2. **Connect directly to a Garmin chest strap** over Bluetooth so live Heart Rate shows on the wrist and syncs alongside the GPS track.
+2. **Connect directly to a Bluetooth heart-rate strap** so live BPM shows on the wrist and syncs alongside the GPS track.
 3. **Upload cleanly to Strava** after the run, while saving rich raw data locally.
 
 ### Keeping Watch Code Simple & Putting the Brains on the Computer
@@ -46,7 +46,7 @@ Each 1-second data point takes just **20 bytes** (`72 KB` per hour of running). 
 | Role | Part | Size | Approx. Cost | Why This Part |
 | :--- | :--- | :--- | :--- | :--- |
 | **Watch Shell** | Casio `W-218H` | `44 × 43 × 10.8 mm` | Owned | Lightweight (`37 g`) resin shell; plastic lets GPS signals pass through |
-| **Brain + Bluetooth** | Seeed Studio `XIAO nRF52840` (unpinned) | `21 × 18 × 3.5 mm` | `$10` (×2) | Pairs with Garmin HR strap, `2 MB` built-in storage, built-in LiPo charger + USB-C |
+| **Brain + Bluetooth** | Seeed Studio `XIAO nRF52840` (unpinned) | `21 × 18 × 3.5 mm` | `$10` (×2) | Pairs with any BLE HR strap, `2 MB` built-in storage, built-in LiPo charger + USB-C |
 | **GPS + Antenna** | Flywoo `GOKU GM10 Nano V3.1` (4-pin, no compass) | `12 × 16 × 4.5 mm` | `$25` | Ultra-small M10 GPS with built-in antenna and pre-wired plug cable |
 | **Screen** | `nice!view` Display (+ Spring Headers for desk test) | `36 × 14 × 2.9 mm` | `$25` | Crisp sunlight-readable reflective LCD, near-zero power draw |
 | **GPS Power Switch** | `LP0701N3-G` P-Channel MOSFET + `10 kΩ` resistor | Legged `TO-92` | `$2` | Physically cuts GPS power to `0.000 mA` when you aren't running |
@@ -83,7 +83,7 @@ The `W-218H` has 3 side buttons—**Bottom-Left**, **Bottom-Right**, and **Top-L
 
 | Watch Screen | **Bottom-Left** | **Bottom-Right** | **Top-Left** |
 | :--- | :--- | :--- | :--- |
-| **1. Everyday Clock** *(Time, Date, Zone, Battery, `#` Saved Runs)* | **Pre-Run Mode** *(turns on GPS + pairs HR strap)* | — | **Hold 2 sec:** Switch travel timezone (`SFO`, `TOR`, `LIS`, `BRU`, etc. — DST adjusts automatically!) |
+| **1. Everyday Clock** *(Time, Date, Zone, Battery, `#` Saved Runs)* | **Pre-Run Mode** *(turns on GPS + pairs HR strap)* | — | **Hold 2 sec:** Cycle travel timezone (Daylight Saving adjusts automatically!) |
 | **2. Pre-Run Ready** *(Shows `GPS: OK` + live `HR`)* | **Cancel** back to Clock *(turns GPS/BLE off)* | **START** recording new run | — |
 | **3. Running** *(`Pace`, `Distance`, `Live HR`, `Timer`)* | — | **PAUSE** *(e.g. at a red light)* | *(Locked while moving so a jacket sleeve can never end your run)* |
 | **4. Paused** *(Shows `PAUSED`)* | **Hold 2 sec:** **DELETE** *(discards accidental run)* | **RESUME** running | **SAVE** *(saves file & returns to Clock)* |
