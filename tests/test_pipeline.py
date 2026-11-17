@@ -4,6 +4,7 @@ import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from cad.generate_stl import build_all_stl_files
 from gummybear.binary import (
     HEADER_STRUCT,
     SAMPLE_STRUCT,
@@ -166,6 +167,45 @@ class TestExportsAndCliEndToEnd(unittest.TestCase):
 
             rc4 = cli_main(["--db", str(db_file), "runs"])
             self.assertEqual(rc4, 0)
+
+    def test_step1_indoor_hr_only_fit_has_no_null_island(self) -> None:
+        indoor_raw = [
+            RawSample(
+                unix_ts=1794873600 + i,
+                lat=0.0,
+                lon=0.0,
+                alt_m=0.0,
+                hdop=25.5,
+                sat_count=0,
+                paused=False,
+                hr_valid=True,
+                hr_bpm=132 + (i % 5),
+                rr_ms=450,
+            )
+            for i in range(30)
+        ]
+        blob = encode_gmy(indoor_raw)
+        cleaned = clean_trajectory(indoor_raw)
+        self.assertTrue(all(not c.has_gps for c in cleaned))
+        summary = summarize_run(cleaned, raw_bytes=blob)
+        self.assertEqual(summary.total_distance_m, 0.0)
+        self.assertIsNotNone(summary.avg_hr_bpm)
+
+        fit_bytes = encode_fit(cleaned, summary)
+        expected_crc = int.from_bytes(fit_bytes[-2:], "little")
+        self.assertEqual(fit_crc16(fit_bytes[:-2]), expected_crc)
+        # Ensure 0x7FFFFFFF invalid lat/lon marker appears in binary FIT records
+        self.assertIn(b"\xff\xff\xff\x7f\xff\xff\xff\x7f", fit_bytes)
+
+    def test_cad_stl_generator_outputs_valid_binary_meshes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cradle_stl, backplate_stl = build_all_stl_files(Path(tmp), xy_step=0.4)
+            for path in (cradle_stl, backplate_stl):
+                data = path.read_bytes()
+                self.assertGreater(len(data), 84)
+                tri_count = int.from_bytes(data[80:84], "little")
+                self.assertGreater(tri_count, 100)
+                self.assertEqual(len(data), 84 + tri_count * 50)
 
 
 if __name__ == "__main__":

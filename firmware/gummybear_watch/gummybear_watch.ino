@@ -1,17 +1,30 @@
 /*
- * Gummybear Sleeper Casio W-218H Firmware (Phase 2)
+ * Gummybear Casio W-218H Running Watch Firmware
  * Target Board: Seeed Studio XIAO nRF52840 (Board Package: Seeed nRF52 Boards)
- * Libraries   : Bluefruit52Lib (built-in), InternalFileSytem (built-in),
- *               Adafruit_GFX + Adafruit_SharpMem (install via Library Manager)
+ *
+ * Display Toggle:
+ *   - DISPLAY_USE_OLED = 1 (default): 0.96" 128x64 I2C OLED (SSD1306, 27x27mm, 4 wires).
+ *     Auto-sleeps after 8s on everyday Clock screen (zero dark-room glow) and stays
+ *     Always-On during PRE_RUN / RUNNING / PAUSED. Also boots cleanly if NO display is
+ *     wired yet during Prototype Step #1!
+ *   - DISPLAY_USE_OLED = 0: nice!view 160x68 SPI Sharp Memory LCD (LS011B7DH03, 5 wires).
  */
 
+#define DISPLAY_USE_OLED 1
+
 #include <Arduino.h>
-#include <SPI.h>
 #include <bluefruit.h>
 #include <Adafruit_LittleFS.h>
 #include <InternalFileSystem.h>
 #include <Adafruit_GFX.h>
+
+#if DISPLAY_USE_OLED
+#include <Wire.h>
+#include <Adafruit_SSD1306.h>
+#else
+#include <SPI.h>
 #include <Adafruit_SharpMem.h>
+#endif
 
 extern "C" {
 #include "../include/gummybear_protocol.h"
@@ -23,12 +36,16 @@ extern "C" {
 
 using namespace Adafruit_LittleFS_Namespace;
 
-// ---- Pin Map (Matches PROJECT_PLAN.md) ----
+// ---- Pin Map (Seeed Studio XIAO nRF52840) ----
+// Note: I2C OLED uses D4 (SDA) and D5 (SCL), so buttons use D1, D2, D3 on both setups!
 static const uint8_t PIN_GPS_PWR_EN = D0; // P-Channel MOSFET gate: LOW = ON, HIGH = OFF (0 uA)
-static const uint8_t PIN_DISP_CS    = D1; // nice!view Sharp Memory LCD CS (SCK=D8, MOSI=D10)
-static const uint8_t PIN_BTN_START  = D2; // Bottom-Right: Start / Pause / Resume
-static const uint8_t PIN_BTN_STOP   = D3; // Top-Left    : Save (when Paused) / Cycle Timezone (on Clock)
-static const uint8_t PIN_BTN_MODE   = D4; // Bottom-Left : Clock <-> Pre-Run / Hold 2s when Paused = Delete
+static const uint8_t PIN_BTN_MODE   = D1; // Bottom-Left : Clock <-> Pre-Run / Hold 2s Paused = Delete
+static const uint8_t PIN_BTN_START  = D2; // Bottom-Right: Start / Pause / Resume / Wake Clock
+static const uint8_t PIN_BTN_STOP   = D3; // Top-Left    : Save (Paused) / Hold 2s Clock = Cycle Zone
+// D4 = I2C SDA (OLED)   |   D5 = I2C SCL (OLED)
+// D6 = GPS UART TX      |   D7 = GPS UART RX
+// D8 = SPI SCK (nice!view), D9 = nice!view CS, D10 = SPI MOSI (nice!view)
+static const uint8_t PIN_NICEVIEW_CS = D9;
 
 #ifndef PIN_VBAT
 #define PIN_VBAT        P0_31
@@ -36,12 +53,25 @@ static const uint8_t PIN_BTN_MODE   = D4; // Bottom-Left : Clock <-> Pre-Run / H
 #define PIN_CHG_CURR    P0_13
 #endif
 
-// ---- Display (nice!view 160x68 Sharp LS011B7DH03) ----
-Adafruit_SharpMem display(&SPI, PIN_DISP_CS, 160, 68);
-#define COLOR_BLACK 0
-#define COLOR_WHITE 1
+// ---- Display Driver Instance ----
+#if DISPLAY_USE_OLED
+static const uint16_t SCREEN_W = 128;
+static const uint16_t SCREEN_H = 64;
+Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire, -1);
+#define FG_COLOR SSD1306_WHITE
+static bool     g_display_ok = false;
+static bool     g_oled_awake = true;
+static uint32_t g_oled_wake_ms = 0;
+static const uint32_t OLED_CLOCK_AWAKE_MS = 8000UL; // Sleep after 8s on Clock screen (zero night glow)
+#else
+static const uint16_t SCREEN_W = 160;
+static const uint16_t SCREEN_H = 68;
+Adafruit_SharpMem display(&SPI, PIN_NICEVIEW_CS, SCREEN_W, SCREEN_H);
+#define FG_COLOR 0
+static bool g_display_ok = true;
+#endif
 
-// ---- BLE Heart Rate Client (Garmin Chest Strap 0x180D / 0x2A37) ----
+// ---- BLE Heart Rate Client (Standard 0x180D / 0x2A37 Chest Strap or Armband) ----
 BLEClientService        hrService(UUID16_SVC_HEART_RATE);
 BLEClientCharacteristic hrMeasChar(UUID16_CHR_HEART_RATE_MEASUREMENT);
 
@@ -56,12 +86,41 @@ static char         g_active_filename[32] = {0};
 static uint16_t     g_run_start_batt_mv = 4100;
 static uint32_t     g_last_1hz_ms = 0;
 
-static uint8_t      g_zone_idx = 0; // Default 0 = "SFO" (Pacific Time w/ US DST)
-static uint32_t     g_rtc_base_unix_ts = 1794787200UL;
+static uint8_t      g_zone_idx = 0; // Default 0 = Pacific Time (auto US DST)
+static uint32_t     g_rtc_base_unix_ts = 1794873600UL;
 static uint32_t     g_rtc_sync_millis = 0;
 static uint16_t     g_unsynced_runs = 0;
 
 static const char *kDowNames[7] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
+
+static void set_oled_power(bool awake) {
+#if DISPLAY_USE_OLED
+    if (!g_display_ok) return;
+    if (awake && !g_oled_awake) {
+        display.ssd1306_command(SSD1306_DISPLAYON);
+        g_oled_awake = true;
+    } else if (!awake && g_oled_awake) {
+        display.clearDisplay();
+        display.display();
+        display.ssd1306_command(SSD1306_DISPLAYOFF);
+        g_oled_awake = false;
+    }
+    if (awake) {
+        g_oled_wake_ms = millis();
+    }
+#else
+    (void)awake;
+#endif
+}
+
+static void flush_display() {
+    if (!g_display_ok) return;
+#if DISPLAY_USE_OLED
+    if (g_oled_awake) display.display();
+#else
+    display.refresh();
+#endif
+}
 
 // ---- Time & Config Persistence ----
 static uint32_t current_utc_ts() {
@@ -229,15 +288,95 @@ static void discard_run_file() {
     g_unsynced_runs = count_unsynced_runs();
 }
 
-// ---- USB Serial Sync Shell (`python3 -m gummybear sync`) ----
-static void poll_usb_sync_commands() {
+static void render_screen();
+
+// ---- Shared Action Triggers (Callable from Physical Buttons OR USB Serial Bench Test!) ----
+static void action_enter_prerun() {
+    g_session.mode = WATCH_STATE_PRE_RUN;
+    set_oled_power(true);
+    set_gps_power(true);
+    set_ble_scanning(true);
+    render_screen();
+}
+
+static void action_return_clock() {
+    g_session.mode = WATCH_STATE_CLOCK;
+    set_gps_power(false);
+    set_ble_scanning(false);
+    set_oled_power(true);
+    render_screen();
+}
+
+static void action_start_run() {
+    watch_start_run(&g_session);
+    open_new_run_file();
+    set_oled_power(true);
+    render_screen();
+}
+
+// ---- USB Serial Sync & Step #1 Bench-Test Shell ----
+static void poll_usb_commands() {
     if (!Serial.available()) return;
     String line = Serial.readStringUntil('\n');
     line.trim();
+    if (line.length() == 0) return;
 
     if (line == "PING") {
-        Serial.println("PONG GUMMYBEAR_0.1");
-    } else if (line == "LIST") {
+        Serial.println("PONG GUMMYBEAR_0.2");
+    } else if (line == "STATUS") {
+        bool hr_fresh = (millis() - g_last_hr_ms) < 5000UL && g_hr.valid;
+        Serial.print("MODE=");
+        Serial.print((int)g_session.mode);
+        Serial.print(" GPS_FIX=");
+        Serial.print(g_gps.has_fix ? 1 : 0);
+        Serial.print(" SATS=");
+        Serial.print(g_gps.sat_count);
+        Serial.print(" HR_BPM=");
+        Serial.print(hr_fresh ? g_hr.bpm : 0);
+        Serial.print(" RR_MS=");
+        Serial.print(hr_fresh ? g_hr.latest_rr_ms : 0);
+        Serial.print(" SAMPLES=");
+        Serial.print(g_session.sample_count);
+        Serial.print(" UNSYNCED=");
+        Serial.println(g_unsynced_runs);
+    } else if (line.startsWith("TIME ")) {
+        uint32_t ts = (uint32_t)strtoul(line.substring(5).c_str(), NULL, 10);
+        if (ts > 1700000000UL) {
+            g_rtc_base_unix_ts = ts;
+            g_rtc_sync_millis = millis();
+            Serial.println("OK TIME_SET");
+        }
+    } else if (line == "MODE") {
+        if (g_session.mode == WATCH_STATE_CLOCK) action_enter_prerun();
+        else if (g_session.mode == WATCH_STATE_PRE_RUN) action_return_clock();
+        Serial.println("OK MODE");
+    } else if (line == "START") {
+        if (g_session.mode == WATCH_STATE_CLOCK) action_enter_prerun();
+        if (g_session.mode == WATCH_STATE_PRE_RUN) action_start_run();
+        else if (g_session.mode == WATCH_STATE_PAUSED) {
+            g_session.mode = WATCH_STATE_RUNNING;
+            render_screen();
+        }
+        Serial.println("OK START");
+    } else if (line == "PAUSE") {
+        if (g_session.mode == WATCH_STATE_RUNNING) {
+            g_session.mode = WATCH_STATE_PAUSED;
+            render_screen();
+        }
+        Serial.println("OK PAUSE");
+    } else if (line == "SAVE") {
+        if (g_session.mode == WATCH_STATE_RUNNING || g_session.mode == WATCH_STATE_PAUSED) {
+            finalize_run_file();
+            action_return_clock();
+        }
+        Serial.println("OK SAVED");
+    } else if (line == "DISCARD") {
+        if (g_session.mode == WATCH_STATE_RUNNING || g_session.mode == WATCH_STATE_PAUSED) {
+            discard_run_file();
+            action_return_clock();
+        }
+        Serial.println("OK DISCARDED");
+    } else if (line == "LIST" && g_session.mode == WATCH_STATE_CLOCK) {
         File dir = InternalFS.open("/runs");
         if (dir) {
             File entry = dir.openNextFile();
@@ -254,7 +393,7 @@ static void poll_usb_sync_commands() {
             dir.close();
         }
         Serial.println("END");
-    } else if (line.startsWith("GET ")) {
+    } else if (line.startsWith("GET ") && g_session.mode == WATCH_STATE_CLOCK) {
         String fname = String("/runs/") + line.substring(4);
         File f = InternalFS.open(fname.c_str(), FILE_O_READ);
         if (!f) {
@@ -270,7 +409,7 @@ static void poll_usb_sync_commands() {
             if (n > 0) Serial.write(buf, (size_t)n);
         }
         f.close();
-    } else if (line.startsWith("DEL ")) {
+    } else if (line.startsWith("DEL ") && g_session.mode == WATCH_STATE_CLOCK) {
         String fname = String("/runs/") + line.substring(4);
         if (InternalFS.remove(fname.c_str())) {
             g_unsynced_runs = count_unsynced_runs();
@@ -281,10 +420,15 @@ static void poll_usb_sync_commands() {
     }
 }
 
-// ---- Minimal Sunlight Casio Screen Renderer (160x68) ----
+// ---- Screen Renderer (Sized cleanly for 128x64 OLED and 160x68 nice!view) ----
 static void render_screen() {
+    if (!g_display_ok) return;
+#if DISPLAY_USE_OLED
+    if (!g_oled_awake) return;
+#endif
+
     display.clearDisplay();
-    display.setTextColor(COLOR_BLACK);
+    display.setTextColor(FG_COLOR);
 
     bool hr_fresh = (millis() - g_last_hr_ms) < 5000UL && g_hr.valid;
 
@@ -292,14 +436,13 @@ static void render_screen() {
         LocalDateTime ldt;
         utc_to_local_datetime(current_utc_ts(), g_zone_idx, &ldt);
 
-        // Top bar: Day + Date + Travel Zone
         display.setTextSize(1);
-        display.setCursor(6, 4);
-        char top_bar[32];
+        display.setCursor(2, 2);
+        char top_bar[24];
         snprintf(
             top_bar,
             sizeof(top_bar),
-            "%s %02u/%02u   %s%s",
+            "%s %02u/%02u  %s%s",
             kDowNames[ldt.dow % 7],
             ldt.month,
             ldt.day,
@@ -308,22 +451,20 @@ static void render_screen() {
         );
         display.print(top_bar);
 
-        // Main Casio time digits
         display.setTextSize(3);
-        display.setCursor(16, 19);
-        char clk[16];
+        display.setCursor(8, 18);
+        char clk[12];
         snprintf(clk, sizeof(clk), "%02u:%02u", ldt.hour, ldt.min);
         display.print(clk);
 
-        // Bottom bar: Battery voltage + unsynced run count
         display.setTextSize(1);
-        display.setCursor(6, 54);
+        display.setCursor(2, 52);
         uint16_t mv = read_battery_mv();
-        char bot_bar[32];
+        char bot_bar[24];
         snprintf(
             bot_bar,
             sizeof(bot_bar),
-            "%.2fV      %u RUN%s",
+            "%.2fV    %u RUN%s",
             mv / 1000.0f,
             g_unsynced_runs,
             (g_unsynced_runs == 1) ? "" : "S"
@@ -331,25 +472,25 @@ static void render_screen() {
         display.print(bot_bar);
     } else if (g_session.mode == WATCH_STATE_PRE_RUN) {
         display.setTextSize(1);
-        display.setCursor(6, 6);
-        display.print("READY - ACQUIRING");
+        display.setCursor(2, 2);
+        display.print("READY - LOCKING");
 
         display.setTextSize(2);
-        display.setCursor(6, 24);
-        display.print(g_gps.has_fix ? "GPS: OK " : "GPS: ...");
+        display.setCursor(2, 18);
+        display.print(g_gps.has_fix ? "GPS:OK " : "GPS:..");
         display.setTextSize(1);
         display.print(g_gps.sat_count);
 
         display.setTextSize(2);
-        display.setCursor(6, 46);
-        display.print("HR : ");
+        display.setCursor(2, 42);
+        display.print("HR :");
         if (hr_fresh) display.print(g_hr.bpm);
         else display.print("---");
     } else {
-        // RUNNING or PAUSED
+        // RUNNING or PAUSED (128x64 compact layout)
         display.setTextSize(2);
-        display.setCursor(4, 6);
-        char pace_buf[12];
+        display.setCursor(2, 4);
+        char pace_buf[10];
         if (g_session.live_pace_sec_km > 0) {
             snprintf(
                 pace_buf,
@@ -363,29 +504,24 @@ static void render_screen() {
         }
         display.print(pace_buf);
 
-        display.setCursor(82, 6);
+        display.setCursor(68, 4);
         display.print(g_session.cum_dist_m / 1000.0, 2);
-        display.setTextSize(1);
-        display.print("k");
 
-        display.drawFastHLine(0, 32, 160, COLOR_BLACK);
+        display.drawFastHLine(0, 28, SCREEN_W, FG_COLOR);
 
         if (g_session.mode == WATCH_STATE_PAUSED) {
             display.setTextSize(1);
-            display.setCursor(4, 38);
+            display.setCursor(2, 34);
             display.print("PAUSED: [TL]=SAVE");
-            display.setCursor(4, 52);
-            display.print("[BR]=GO  HOLD[BL]=DEL");
+            display.setCursor(2, 48);
+            display.print("[BR]=GO HOLD[BL]=DEL");
         } else {
             display.setTextSize(2);
-            display.setCursor(4, 42);
+            display.setCursor(2, 38);
             if (hr_fresh) display.print(g_hr.bpm);
             else display.print("---");
-            display.setTextSize(1);
-            display.print("bpm");
 
-            display.setTextSize(2);
-            display.setCursor(74, 42);
+            display.setCursor(54, 38);
             char t_buf[12];
             uint32_t m = g_session.timer_s / 60;
             uint32_t s = g_session.timer_s % 60;
@@ -394,10 +530,10 @@ static void render_screen() {
         }
     }
 
-    display.refresh();
+    flush_display();
 }
 
-// ---- Debounced Short-Press & 2-Second Long-Hold Detection ----
+// ---- Debounced Button Helpers ----
 static bool button_pressed_edge(uint8_t pin, uint8_t idx) {
     static bool     prev_state[3] = {true, true, true};
     static uint32_t last_ms[3] = {0, 0, 0};
@@ -446,7 +582,15 @@ void setup() {
     load_zone_config();
     g_unsynced_runs = count_unsynced_runs();
 
+#if DISPLAY_USE_OLED
+    Wire.begin();
+    g_display_ok = display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+    g_oled_wake_ms = millis();
+#else
     display.begin();
+    g_display_ok = true;
+#endif
+
     nmea_init(&g_gps);
     watch_session_init(&g_session);
     set_gps_power(false);
@@ -473,12 +617,20 @@ void loop() {
         while (Serial1.available()) {
             nmea_feed_char(&g_gps, (char)Serial1.read());
         }
-    } else {
-        poll_usb_sync_commands();
     }
+    poll_usb_commands();
 
-    // Hold Top-Left 2s on CLOCK -> Cycle travel timezone (SFO -> DEN -> CHI -> TOR -> LIS -> BRU ...)
+#if DISPLAY_USE_OLED
+    // Auto-sleep OLED after 8 seconds on Clock screen so watch never glows in dark rooms
+    if (g_session.mode == WATCH_STATE_CLOCK && g_oled_awake &&
+        (millis() - g_oled_wake_ms >= OLED_CLOCK_AWAKE_MS)) {
+        set_oled_power(false);
+    }
+#endif
+
+    // Hold Top-Left 2s on CLOCK -> Cycle travel timezone
     if (g_session.mode == WATCH_STATE_CLOCK && button_held_2s(PIN_BTN_STOP, 0)) {
+        set_oled_power(true);
         g_zone_idx = (g_zone_idx + 1) % NUM_TRAVEL_ZONES;
         save_zone_config();
         render_screen();
@@ -487,33 +639,33 @@ void loop() {
     // Hold Bottom-Left 2s when PAUSED -> DELETE / Discard junk run
     if (g_session.mode == WATCH_STATE_PAUSED && button_held_2s(PIN_BTN_MODE, 1)) {
         discard_run_file();
-        g_session.mode = WATCH_STATE_CLOCK;
-        set_gps_power(false);
-        set_ble_scanning(false);
-        render_screen();
+        action_return_clock();
     }
 
-    // Bottom-Left short press: Clock <-> Pre-Run
+    // Bottom-Left short press: Wake Clock or Toggle Clock <-> Pre-Run
     if (button_pressed_edge(PIN_BTN_MODE, 0)) {
         if (g_session.mode == WATCH_STATE_CLOCK) {
-            g_session.mode = WATCH_STATE_PRE_RUN;
-            set_gps_power(true);
-            set_ble_scanning(true);
-            render_screen();
+#if DISPLAY_USE_OLED
+            if (!g_oled_awake) {
+                set_oled_power(true);
+                render_screen();
+            } else
+#endif
+            {
+                action_enter_prerun();
+            }
         } else if (g_session.mode == WATCH_STATE_PRE_RUN) {
-            g_session.mode = WATCH_STATE_CLOCK;
-            set_gps_power(false);
-            set_ble_scanning(false);
-            render_screen();
+            action_return_clock();
         }
     }
 
-    // Bottom-Right short press: Start / Pause / Resume
+    // Bottom-Right short press: Wake Clock (in Clock mode) or Start / Pause / Resume
     if (button_pressed_edge(PIN_BTN_START, 1)) {
-        if (g_session.mode == WATCH_STATE_PRE_RUN) {
-            watch_start_run(&g_session);
-            open_new_run_file();
+        if (g_session.mode == WATCH_STATE_CLOCK) {
+            set_oled_power(true);
             render_screen();
+        } else if (g_session.mode == WATCH_STATE_PRE_RUN) {
+            action_start_run();
         } else if (g_session.mode == WATCH_STATE_RUNNING) {
             g_session.mode = WATCH_STATE_PAUSED;
             render_screen();
@@ -523,18 +675,18 @@ void loop() {
         }
     }
 
-    // Top-Left short press: SAVE run (only unlocked while PAUSED so sleeve bumps can't end a run!)
+    // Top-Left short press: Wake Clock or SAVE run (only unlocked while PAUSED)
     if (button_pressed_edge(PIN_BTN_STOP, 2)) {
-        if (g_session.mode == WATCH_STATE_PAUSED) {
-            finalize_run_file();
-            g_session.mode = WATCH_STATE_CLOCK;
-            set_gps_power(false);
-            set_ble_scanning(false);
+        if (g_session.mode == WATCH_STATE_CLOCK) {
+            set_oled_power(true);
             render_screen();
+        } else if (g_session.mode == WATCH_STATE_PAUSED) {
+            finalize_run_file();
+            action_return_clock();
         }
     }
 
-    // 1 Hz tick
+    // 1 Hz telemetry tick
     uint32_t now = millis();
     if (now - g_last_1hz_ms >= 1000UL) {
         g_last_1hz_ms = now;
@@ -546,17 +698,38 @@ void loop() {
             hr_snap.latest_rr_ms = g_hr.latest_rr_ms;
 
             GmyRunSample sample;
-            if (watch_tick_1hz(&g_session, &g_gps, &hr_snap, hr_fresh, &sample) && g_run_file) {
+            if (watch_tick_1hz_ex(&g_session, &g_gps, &hr_snap, hr_fresh, current_utc_ts(), &sample) &&
+                g_run_file) {
                 g_run_file.write((const uint8_t *)&sample, sizeof(sample));
                 if ((g_session.sample_count % 5u) == 0u) {
                     g_run_file.flush();
                 }
             }
+            // Print live heartbeat + GPS status to laptop terminal if USB-C connected during bench testing!
+            if (Serial) {
+                Serial.print("[TICK] t=");
+                Serial.print(g_session.timer_s);
+                Serial.print("s hr=");
+                Serial.print(hr_fresh ? g_hr.bpm : 0);
+                Serial.print(" rr=");
+                Serial.print(hr_fresh ? g_hr.latest_rr_ms : 0);
+                Serial.print("ms sats=");
+                Serial.println(g_gps.sat_count);
+            }
             render_screen();
         } else if (g_session.mode == WATCH_STATE_PRE_RUN) {
+            if (Serial) {
+                bool hr_fresh = (now - g_last_hr_ms) < 5000UL;
+                Serial.print("[READY] gps_fix=");
+                Serial.print(g_gps.has_fix ? 1 : 0);
+                Serial.print(" sats=");
+                Serial.print(g_gps.sat_count);
+                Serial.print(" hr=");
+                Serial.println(hr_fresh ? g_hr.bpm : 0);
+            }
             render_screen();
         } else if ((now / 1000UL) % 30UL == 0UL) {
-            render_screen(); // Refresh clock minute/date cleanly
+            render_screen();
         }
     }
 

@@ -82,12 +82,15 @@ static inline float _step_dist_m(
     return (float)sqrt(dx * dx + dy * dy);
 }
 
-// Build a 20-byte CRC-protected GmyRunSample and update live watch display metrics
-static inline bool watch_tick_1hz(
+// Build a 20-byte CRC-protected GmyRunSample and update live watch display metrics.
+// Supports both outdoor GPS+HR runs and indoor GPS-free BLE HR bench/treadmill tests
+// (`fallback_utc_ts` is used when `gps->has_fix` is false).
+static inline bool watch_tick_1hz_ex(
     WatchSession *ws,
     const NmeaGpsState *gps,
     const BleHrReading *hr,
     bool hr_fresh,
+    uint32_t fallback_utc_ts,
     GmyRunSample *out_sample
 ) {
     if (ws->mode != WATCH_STATE_RUNNING && ws->mode != WATCH_STATE_PAUSED) {
@@ -99,10 +102,10 @@ static inline bool watch_tick_1hz(
         ws->timer_s++;
     }
 
-    if (gps->has_fix) {
+    bool has_gps = (gps && gps->has_fix && gps->unix_ts > 0);
+    if (has_gps) {
         if (!paused && ws->has_prev_pos) {
             float d = _step_dist_m(ws->prev_lat_e7, ws->prev_lon_e7, gps->lat_e7, gps->lon_e7);
-            // Ignore standing GPS jitter (<0.4 m/s) and teleport spikes (>15 m/s) on live screen
             if (d >= 0.4f && d <= 15.0f) {
                 ws->cum_dist_m += d;
                 ws->ema_speed_mps = (ws->ema_speed_mps <= 0.1f)
@@ -120,20 +123,22 @@ static inline bool watch_tick_1hz(
         ws->has_prev_pos = true;
     }
 
-    if (!gps->has_fix || gps->unix_ts == 0) {
-        return false; // Wait for valid GPS fix before writing flash frame
+    bool use_hr = (hr_fresh && hr && hr->valid && hr->bpm > 0);
+    // Record frame if either GPS has satellite fix OR live BLE HR is streaming (Step #1 bench / indoor)
+    if (!has_gps && (!use_hr || fallback_utc_ts == 0)) {
+        return false;
     }
 
-    uint8_t flags = (gps->sat_count & GMY_FLAG_SAT_MASK);
+    uint8_t sats = has_gps ? (gps->sat_count & GMY_FLAG_SAT_MASK) : 0u;
+    uint8_t flags = sats;
     if (paused) flags |= GMY_FLAG_PAUSED;
-    bool use_hr = (hr_fresh && hr && hr->valid && hr->bpm > 0);
     if (use_hr) flags |= GMY_FLAG_HR_VALID;
 
-    out_sample->unix_ts = gps->unix_ts;
-    out_sample->lat_e7 = gps->lat_e7;
-    out_sample->lon_e7 = gps->lon_e7;
-    out_sample->alt_dm = gps->alt_dm;
-    out_sample->hdop_x10 = gps->hdop_x10;
+    out_sample->unix_ts = has_gps ? gps->unix_ts : fallback_utc_ts;
+    out_sample->lat_e7 = has_gps ? gps->lat_e7 : 0;
+    out_sample->lon_e7 = has_gps ? gps->lon_e7 : 0;
+    out_sample->alt_dm = has_gps ? gps->alt_dm : 0;
+    out_sample->hdop_x10 = has_gps ? gps->hdop_x10 : 255u;
     out_sample->sat_flags = flags;
     out_sample->hr_bpm = use_hr ? hr->bpm : 0;
     out_sample->rr_ms = use_hr ? hr->latest_rr_ms : 0;
@@ -144,6 +149,16 @@ static inline bool watch_tick_1hz(
     );
     ws->sample_count++;
     return true;
+}
+
+static inline bool watch_tick_1hz(
+    WatchSession *ws,
+    const NmeaGpsState *gps,
+    const BleHrReading *hr,
+    bool hr_fresh,
+    GmyRunSample *out_sample
+) {
+    return watch_tick_1hz_ex(ws, gps, hr, hr_fresh, 0, out_sample);
 }
 
 static inline void watch_build_header(

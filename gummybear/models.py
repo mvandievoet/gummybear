@@ -33,6 +33,7 @@ class CleanSample:
     paused: bool
     hr_bpm: Optional[int]
     rr_ms: Optional[int]
+    has_gps: bool = True
 
 
 @dataclass(frozen=True)

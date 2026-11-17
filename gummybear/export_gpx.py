@@ -48,6 +48,9 @@ def encode_gpx(samples: Sequence[CleanSample], name: str = "Casio W-218H Run") -
             lines.append("    <trkseg>")
             in_paused_gap = False
 
+        if not s.has_gps:
+            continue
+
         lines.append(f'      <trkpt lat="{s.lat:.7f}" lon="{s.lon:.7f}">')
         lines.append(f"        <ele>{s.alt_m:.1f}</ele>")
         lines.append(f"        <time>{_iso_utc(s.unix_ts)}</time>")

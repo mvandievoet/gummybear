@@ -14,7 +14,7 @@ from gummybear.metrics import format_pace, summarize_run
 from gummybear.models import HrvMetrics, RunSummary, Split
 from gummybear.simulator import generate_synthetic_sf_run
 from gummybear.storage import RunWarehouse
-from gummybear.sync import pull_runs_over_usb_serial
+from gummybear.sync import pull_runs_over_usb_serial, run_step1_bench_hr_session
 from gummybear.strava import (
     DEFAULT_TOKEN_PATH,
     authorize_interactive,
@@ -264,6 +264,35 @@ def cmd_sync(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bench(args: argparse.Namespace) -> int:
+    raw_dir = Path(args.db).parent / "raw"
+    pulled = run_step1_bench_hr_session(
+        output_dir=raw_dir,
+        duration_s=args.seconds,
+        port=args.port,
+    )
+    for gmy_path in pulled:
+        ingest_ns = argparse.Namespace(
+            db=args.db, file=str(gmy_path), name="Indoor HR Bench Test"
+        )
+        cmd_ingest(ingest_ns)
+        if args.upload:
+            db = RunWarehouse(Path(args.db))
+            runs = db.list_runs()
+            if runs:
+                latest_id = int(runs[0]["id"])
+                up_ns = argparse.Namespace(
+                    db=args.db,
+                    run_id=latest_id,
+                    name=None,
+                    description=None,
+                    format="fit",
+                    token_file=args.token_file,
+                )
+                cmd_upload(up_ns)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gummybear",
@@ -310,6 +339,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--upload", action="store_true", help="Automatically upload newly synced runs to Strava")
     p_sync.add_argument("--token-file", default=str(DEFAULT_TOKEN_PATH))
     p_sync.set_defaults(func=cmd_sync)
+
+    p_bench = sub.add_parser(
+        "bench",
+        help="Prototype Step #1: record live Bluetooth HR onto USB-connected XIAO #1 (no buttons/GPS needed)",
+    )
+    p_bench.add_argument("--seconds", type=int, default=30, help="Recording duration in seconds")
+    p_bench.add_argument("--port", default=None, help="Serial port (auto-detects /dev/cu.usbmodem* if omitted)")
+    p_bench.add_argument("--upload", action="store_true", help="Automatically upload the recorded HR test to Strava")
+    p_bench.add_argument("--token-file", default=str(DEFAULT_TOKEN_PATH))
+    p_bench.set_defaults(func=cmd_bench)
 
     return parser
 

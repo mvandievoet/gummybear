@@ -207,8 +207,30 @@ def clean_trajectory(
         return []
 
     ordered = sorted(raw_samples, key=lambda s: s.unix_ts)
-    lat0 = ordered[0].lat
-    lon0 = ordered[0].lon
+    gps_points = [s for s in ordered if s.sat_count > 0 and not (s.lat == 0.0 and s.lon == 0.0)]
+
+    # Indoor / Prototype Step #1 HR-only recording (no GPS connected yet)
+    if not gps_points:
+        return [
+            CleanSample(
+                unix_ts=raw.unix_ts,
+                lat=0.0,
+                lon=0.0,
+                alt_m=0.0,
+                cum_dist_m=0.0,
+                speed_mps=0.0,
+                grade=0.0,
+                gap_speed_mps=0.0,
+                paused=raw.paused,
+                hr_bpm=raw.hr_bpm if raw.hr_valid else None,
+                rr_ms=raw.rr_ms if raw.hr_valid else None,
+                has_gps=False,
+            )
+            for raw in ordered
+        ]
+
+    lat0 = gps_points[0].lat
+    lon0 = gps_points[0].lon
     cos_lat0 = math.cos(math.radians(lat0))
 
     ts_list: List[int] = []

@@ -6,6 +6,7 @@ when syncing physical hardware.
 """
 
 import glob
+import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -87,3 +88,78 @@ def pull_runs_over_usb_serial(
                     print(f"Warning: watch did not delete {fname}: {ack}")
 
     return downloaded
+
+
+def run_step1_bench_hr_session(
+    output_dir: Path,
+    duration_s: int = 30,
+    port: Optional[str] = None,
+    baudrate: int = 115200,
+) -> List[Path]:
+    """Automated Prototype Step #1 helper: syncs Mac time to XIAO #1 over USB-C,
+    pairs with your Bluetooth HR strap, records `duration_s` of live heartbeat data
+    onto XIAO's 2 MB flash (no buttons/screen/GPS required), and pulls the `.gmy` file.
+    """
+    try:
+        import serial  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise RuntimeError(
+            "Bench test requires `pyserial`. Install with: pip install pyserial"
+        ) from exc
+
+    resolved_port = port or auto_detect_watch_port()
+    if not resolved_port:
+        raise FileNotFoundError(
+            "No XIAO nRF52840 detected on /dev/cu.usbmodem*. Plug XIAO #1 in via USB-C first."
+        )
+
+    with serial.Serial(resolved_port, baudrate=baudrate, timeout=3.0) as ser:
+        ser.reset_input_buffer()
+        now_ts = int(time.time())
+        ser.write(f"TIME {now_ts}\n".encode("utf-8"))
+        ser.readline()
+
+        print(f"Connected to {resolved_port}. Scanning Bluetooth for your HR strap...")
+        ser.write(b"MODE\n")
+        ser.readline()
+
+        locked_bpm = 0
+        wait_deadline = time.time() + 25.0
+        while time.time() < wait_deadline:
+            line = ser.readline().decode("utf-8", errors="replace").strip()
+            if "hr=" in line:
+                for tok in line.split():
+                    if tok.startswith("hr="):
+                        val = int(tok.split("=")[1])
+                        if val > 0:
+                            locked_bpm = val
+                            break
+            if locked_bpm > 0:
+                print(f"Locked onto HR strap! Live HR = {locked_bpm} bpm.")
+                break
+
+        if locked_bpm == 0:
+            ser.write(b"MODE\n")
+            raise RuntimeError(
+                "Timed out waiting for Bluetooth HR strap (make sure strap pads are moistened and worn)."
+            )
+
+        print(f"Recording {duration_s}s indoor HR session onto XIAO flash...")
+        ser.write(b"START\n")
+        ser.readline()
+
+        rec_end = time.time() + duration_s
+        while time.time() < rec_end:
+            line = ser.readline().decode("utf-8", errors="replace").strip()
+            if line.startswith("[TICK]"):
+                print(f"  {line}")
+
+        ser.write(b"PAUSE\n")
+        ser.readline()
+        ser.write(b"SAVE\n")
+        ser.readline()
+        print("Saved on XIAO flash. Pulling `.gmy` log over USB-C...")
+
+    return pull_runs_over_usb_serial(
+        output_dir=output_dir, port=resolved_port, baudrate=baudrate
+    )

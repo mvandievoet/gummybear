@@ -136,10 +136,15 @@ def encode_fit(samples: Sequence[CleanSample], summary: RunSummary) -> bytes:
             chunks.append(struct.pack("<BIBB", 5, fit_ts, 0, 0))  # timer start
             was_paused = False
 
-        lat_sc = deg_to_semicircles(s.lat)
-        lon_sc = deg_to_semicircles(s.lon)
+        if s.has_gps:
+            lat_sc = deg_to_semicircles(s.lat)
+            lon_sc = deg_to_semicircles(s.lon)
+            alt_scaled = max(0, min(65534, int(round((s.alt_m + 500.0) * 5.0))))
+        else:
+            lat_sc = 0x7FFFFFFF  # FIT sint32 invalid -> tells Strava indoor/no-GPS point
+            lon_sc = 0x7FFFFFFF
+            alt_scaled = 0xFFFF  # FIT uint16 invalid
         dist_cm = max(0, int(round(s.cum_dist_m * 100.0)))
-        alt_scaled = max(0, min(65534, int(round((s.alt_m + 500.0) * 5.0))))
         spd_mms = max(0, min(65534, int(round(s.speed_mps * 1000.0))))
         hr = max(1, min(254, s.hr_bpm)) if (s.hr_bpm is not None and s.hr_bpm > 0) else 0xFF
         chunks.append(
