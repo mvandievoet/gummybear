@@ -24,8 +24,8 @@ Instead of making the tiny watch processor do heavy math or complicated menus, w
 Older hobby GPS chips draw ~`40+ mA` of power, which would require a bulky battery to survive a long trail run. Instead, we use a fingernail-sized 10th-generation **u-blox M10 GPS module (`Flywoo GM10 Nano V3.1`)** that draws ~`65%` less power (`~16–20 mA`) and already has its antenna built right on top. Paired with a slim `450 mAh` pouch battery, we get **~20+ hours of continuous GPS + Heart Rate tracking** (plenty for an ultramarathon) while keeping the watch compact.
 
 ### Why do we swap the inner screen (while keeping Casio's front window)?
-* **What stays:** Casio's clear outer front window (`19.96 × 13.5 mm` viewing area)—with all the classic printed borders and logos—is glued into the outer shell and stays untouched.
-* **What changes underneath:** Casio's inner pocket measures **`31.07 × 28.05 mm`**, and Casio's bare liquid-crystal glass uses ~30 unlabelled rubber contacts that can't connect to a small hobby chip. We drop a **`0.96"` `I2C` OLED module (`27 × 27 mm` board, `21.7 × 10.9 mm` screen)** right behind Casio's clear window—it fits the `31 × 28 mm` pocket with zero case cutting, fills the `20 mm` window cleanly, is readable day or night without an extra backlight LED, and wires up with just 4 pins (`VCC, GND, SCL, SDA`). *(Our firmware also supports the `36 mm` `nice!view` reflective LCD for desk testing or wider Casio shells.)*
+* **What stays:** Casio's clear outer front window (`20.0 × 13.5 mm` viewing area)—with all the classic printed borders and logos—is glued into the outer shell and stays untouched.
+* **What changes underneath:** Casio's inner pocket measures **`31.0 × 28.0 mm`**, and Casio's bare liquid-crystal glass uses ~30 unlabelled rubber contacts that can't connect to a small hobby chip. We drop a **`0.96"` `I2C` OLED module (`27 × 27 mm` board, `21.7 × 10.9 mm` screen)** right behind Casio's clear window—it fits the `31 × 28 mm` pocket with zero case cutting, fills the `20 mm` window cleanly, is readable day or night without an extra backlight LED, and wires up with just 4 pins (`VCC, GND, SCL, SDA`). *(Our firmware also supports the `36 mm` `nice!view` reflective LCD for desk testing or wider Casio shells.)*
 
 ### How do the original Casio side buttons keep working?
 The 3 silver buttons on the outside of a Casio aren't electrical switches—they are just sliding metal pins sealed with tiny rubber O-rings. When we remove Casio's original plastic core, those pins poke into empty space. At the Makerspace, we 3D-print a thin **internal plastic cradle** that holds 3 tiny clicky micro-switches (like mouse buttons) right behind Casio's sliding pins, so the original exterior buttons click naturally.
@@ -45,12 +45,12 @@ Each 1-second data point takes just **20 bytes** (`72 KB` per hour of running). 
 
 | Role | Part | Size | Approx. Cost | Why This Part |
 | :--- | :--- | :--- | :--- | :--- |
-| **Watch Shell** | Casio `W-218H` | `31.07 × 28.05 mm` inner pocket | Owned | Lightweight (`37 g`) resin shell; plastic lets GPS signals pass through |
+| **Watch Shell** | Casio `W-218H` | `31.0 × 28.0 mm` inner pocket | Owned | Lightweight (`37 g`) resin shell; plastic lets GPS signals pass through |
 | **Brain + Bluetooth** | Seeed Studio `XIAO nRF52840` (unpinned) | `21 × 18 × 3.5 mm` | `$10` (×2) | Ordered (DigiKey) — BLE HR, `2 MB` storage, LiPo charger + USB-C |
 | **GPS + Antenna** | Flywoo `GOKU GM10 Nano V3.1` (4-pin, no compass) | `12 × 16 × 4.5 mm` | `$25` | Ordered (GetFPV) — M10 GPS with built-in antenna + plug cable |
 | **Watch Screen** | `0.96"` `I2C` OLED (`SSD1306`, `128 × 64`, 4-pin) | `27 × 27 × 2.5 mm` | `$5` | Drops straight into `31 × 28 mm` pocket with zero case cutting (`nice!view` also on hand for desk/wider case) |
 | **GPS Power Switch** | `LP0701N3-G` P-Channel MOSFET + `10 kΩ` resistor | Legged `TO-92` | `$2` | Ordered (DigiKey) — cuts GPS power to `0.000 mA` when idle |
-| **Battery** | `602525` (`400 mAh`) or `502025` (`250 mAh`) Protected LiPo | `≤ 25 × 25 × 6 mm` | `$8` | Fits cleanly inside `31.07 × 28.05 mm` pocket with room for wire bend |
+| **Battery** | `602525` (`400 mAh`) or `502025` (`250 mAh`) Protected LiPo | `≤ 25 × 25 × 6 mm` | `$8` | Fits cleanly inside `31.0 × 28.0 mm` pocket with room for wire bend |
 | **Watch Switches** | `3×` Right-angle side-push micro-switches (`3 × 4 × 2 mm`) | `3 × 4 × 2 mm` | `$5` | Click sideways when Casio's exterior buttons push inward |
 | **Bench & Wiring** | Mini solderless breadboard + Dupont jumper wires + `30 AWG` silicone wire + USB-C silicone plug | — | `$18` | Desk prototyping + flexible final watch wiring |
 

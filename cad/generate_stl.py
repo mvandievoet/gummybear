@@ -2,9 +2,9 @@
 
 Calibrated directly from caliper measurements and ruler photos of the Casio W-218H
 (Module 3224):
-  - Inner pocket          : 31.07 mm (W) x 28.05 mm (H)
+  - Inner pocket          : 31.0 mm (W) x 28.0 mm (H)
   - Pocket depths         : 6.9 mm to crystal, 5.7 mm to brushed bezel, 5.0 mm to 4 tabs
-  - Clear front window    : 19.96 mm (W) x 13.2 mm (H)
+  - Clear front window    : 20.0 mm (W) x 13.2 mm (H)
   - Backplate screw grid  : 22.0 mm (W) x 33.0 mm (H), screw head ~2.4 mm
   - Side button pins      : Y = +8.0 mm (Top-Left), Y = -8.0 mm (Bottom-Left & Bottom-Right)
 
@@ -27,9 +27,9 @@ Triangle = Tuple[
 
 
 # ---- Calibrated Casio W-218H Constants (mm) ----
-POCKET_W = 31.07
-POCKET_H = 28.05
-SLIP_CLEARANCE = 0.23  # per side -> 30.61 x 27.59 mm outer cradle fit
+POCKET_W = 31.0
+POCKET_H = 28.0
+SLIP_CLEARANCE = 0.20  # per side -> 30.6 x 27.6 mm outer cradle fit
 
 SCREW_SPAN_X = 22.0
 SCREW_SPAN_Y = 33.0
