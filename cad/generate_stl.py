@@ -1,48 +1,59 @@
-"""Parametric 3D `.STL` mesh generator for the Casio W-218H running watch mod.
+"""Parametric 3D `.STL` generator using Nominal Geometry + Directional Process Clearance.
 
-Calibrated directly from caliper measurements and ruler photos of the Casio W-218H
-(Module 3224):
-  - Inner pocket          : 31.0 mm (W) x 28.0 mm (H)
-  - Pocket depths         : 6.9 mm to crystal, 5.7 mm to brushed bezel, 5.0 mm to 4 tabs
-  - Clear front window    : 20.0 mm (W) x 13.2 mm (H)
-  - Backplate screw grid  : 22.0 mm (W) x 33.0 mm (H), screw head ~2.4 mm
-  - Side button pins      : Y = +8.0 mm (Top-Left), Y = -8.0 mm (Bottom-Left & Bottom-Right)
-
-Outputs guaranteed watertight 2-manifold binary `.STL` files using greedy-meshed
-exact Z-slabs (0.125 mm XY resolution, exact floating-point Z planes) with zero
-external CAD dependencies.
+Design Methodology (ISO 286 Hole/Shaft Basis adapted for Additive Manufacturing):
+  1. Recover 1-decimal-place metric NOMINAL design intent from caliper measurements
+     (discarding +/-0.05 mm hand-caliper / mold-draft noise).
+  2. Keep positional datums (screw hole centers, window center, button offsets) at
+     EXACT nominal values.
+  3. Apply a single per-side process clearance `c` directionally:
+       - External mating features (cradle outer walls) : `Nominal - 2*c`
+       - Internal pockets & holes (OLED, switches, screws) : `Nominal + 2*c`
+     where:
+       - `c = 0.1 mm` for SLA Resin printers (e.g., Formlabs)
+       - `c = 0.2 mm` for FDM Filament printers (e.g., Bambu / Prusa, default)
+       (For comparison, injection molding uses `c ~ 0.05 mm`, which is too tight for 3D prints.)
 """
 
-import math
+import argparse
 import struct
 from pathlib import Path
-from typing import Callable, List, Sequence, Tuple
+from typing import Callable, Dict, List, Sequence, Tuple
 
 Triangle = Tuple[
-    Tuple[float, float, float],  # normal
-    Tuple[float, float, float],  # v1
-    Tuple[float, float, float],  # v2
-    Tuple[float, float, float],  # v3
+    Tuple[float, float, float],
+    Tuple[float, float, float],
+    Tuple[float, float, float],
+    Tuple[float, float, float],
 ]
 
+PROCESS_CLEARANCE_MM: Dict[str, float] = {
+    "sla": 0.1,  # Resin stereolithography (+/- 0.05..0.08 mm machine accuracy)
+    "fdm": 0.2,  # Filament extrusion (+/- 0.15 mm bead swell & corner bulge)
+}
 
-# ---- Calibrated Casio W-218H Constants (mm) ----
-POCKET_W = 31.0
-POCKET_H = 28.0
-SLIP_CLEARANCE = 0.20  # per side -> 30.6 x 27.6 mm outer cradle fit
+# ---- 1-Decimal Nominal Dimensions of Casio W-218H & Components (mm) ----
+NOM_POCKET_W = 31.0
+NOM_POCKET_H = 28.0
+NOM_WINDOW_W = 20.0
+NOM_WINDOW_H = 13.2
 
-SCREW_SPAN_X = 22.0
-SCREW_SPAN_Y = 33.0
-SCREW_THROUGH_R = 0.92   # 1.84 mm diameter through-hole for factory screw threads
-SCREW_CBORE_R = 1.95     # 3.90 mm counterbore for 2.4 mm screw head + driver tip
-EAR_TAB_THICKNESS = 0.85 # Thin recessed corner tabs so stock short Casio screws bite!
+NOM_SCREW_SPAN_X = 22.0
+NOM_SCREW_SPAN_Y = 33.0
+NOM_SCREW_SHAFT_D = 1.6
+NOM_SCREW_DRIVER_D = 3.6  # Clearance for #00 Phillips driver tip + 2.4 mm head
+NOM_EAR_THICKNESS = 0.8
 
-OLED_BOARD_W = 27.4      # 27.0 mm SSD1306 0.96" OLED PCB + 0.2 mm clearance/side
-OLED_BOARD_H = 27.4
-WINDOW_CUT_W = 22.2      # Clears 21.74 x 10.86 mm OLED active area behind 19.96 mm window
-WINDOW_CUT_H = 12.6
+NOM_OLED_W = 27.0
+NOM_OLED_H = 27.0
+NOM_OLED_ACTIVE_W = 21.8
+NOM_OLED_ACTIVE_H = 11.0
 
-BTN_Y_OFFSET = 8.0       # +/- 8.0 mm from horizontal centerline
+NOM_SWITCH_DEPTH = 3.0
+NOM_SWITCH_WIDTH = 4.0
+NOM_BTN_OFFSET_Y = 8.0
+
+NOM_USBC_PLUG_W = 9.0
+NOM_USBC_PLUG_H = 3.2
 
 
 def _in_chamfered_rect(x: float, y: float, half_w: float, half_h: float, chamfer: float) -> bool:
@@ -61,125 +72,118 @@ def _in_circle(x: float, y: float, cx: float, cy: float, r: float) -> bool:
     return (dx * dx + dy * dy) <= (r * r)
 
 
-# ---- 1. Solid Definition: Snap-In Inner Switch & OLED Cradle ----
 CRADLE_Z_PLANES = [0.0, 0.9, 1.8, 3.6, 4.8]
+BACKPLATE_Z_PLANES = [0.0, NOM_EAR_THICKNESS, 1.3, 4.0, 5.2]
 
 
-def cradle_solid(x: float, y: float, z: float) -> bool:
-    """z=0 rests on the 5.7mm inner bezel frame; z=4.8 reaches near the back rim."""
-    hw = (POCKET_W * 0.5) - SLIP_CLEARANCE  # 15.305 mm
-    hh = (POCKET_H * 0.5) - SLIP_CLEARANCE  # 13.795 mm
+def make_cradle_solid(clearance_per_side: float) -> Callable[[float, float, float], bool]:
+    c = clearance_per_side
+    # External plug into Casio pocket: Nominal - 2*c (subtract `c` from each half-extent)
+    hw = (NOM_POCKET_W * 0.5) - c
+    hh = (NOM_POCKET_H * 0.5) - c
 
-    if not _in_chamfered_rect(x, y, hw, hh, chamfer=3.8):
-        return False
+    # Internal pockets receiving components: Nominal + 2*c (add `c` to each half-extent)
+    oled_hw = (NOM_OLED_W * 0.5) + c
+    oled_hh = (NOM_OLED_H * 0.5) + c
+    win_hw = (NOM_OLED_ACTIVE_W * 0.5) + c
+    win_hh = (NOM_OLED_ACTIVE_H * 0.5) + c
+    sw_depth = NOM_SWITCH_DEPTH + c
+    sw_half_w = (NOM_SWITCH_WIDTH * 0.5) + c
 
-    # Relief notches on front face (z < 0.9) for the 4 small 5.0mm Casio alignment tabs
-    if z < 0.9:
-        if 5.0 <= abs(x) <= 9.8 and abs(y) >= (hh - 3.0):
+    def solid(x: float, y: float, z: float) -> bool:
+        if not _in_chamfered_rect(x, y, hw, hh, chamfer=3.8):
             return False
 
-    # Front viewing aperture (z < 1.8) aligned with clear window
-    if z < 1.8:
-        if abs(x) <= (WINDOW_CUT_W * 0.5) and abs(y) <= (WINDOW_CUT_H * 0.5):
+        # Relief cutouts on front face (z < 0.9) for Casio's 4 alignment tabs at 5.0 mm depth
+        if z < 0.9 and (5.0 <= abs(x) <= 9.8) and abs(y) >= (hh - 3.0):
             return False
 
-    # 0.96" I2C OLED PCB seat (z >= 0.9..3.6) + open center bay above z >= 1.8
-    if 0.9 <= z < 3.6:
-        # Leave corner retention ledges while cradling 27.0 x 27.0 mm OLED board
-        if abs(x) <= (OLED_BOARD_W * 0.5) and abs(y) <= (OLED_BOARD_H * 0.5):
-            # Keep 3 side switch housing blocks intact above z >= 1.8
-            in_tl_boss = (x < -hw + 3.8) and (abs(y - BTN_Y_OFFSET) <= 3.6) and (z >= 1.8)
-            in_bl_boss = (x < -hw + 3.8) and (abs(y + BTN_Y_OFFSET) <= 3.6) and (z >= 1.8)
-            in_br_boss = (x > hw - 3.8) and (abs(y + BTN_Y_OFFSET) <= 3.6) and (z >= 1.8)
-            if not (in_tl_boss or in_bl_boss or in_br_boss):
+        # Front viewing aperture
+        if z < 1.8 and abs(x) <= win_hw and abs(y) <= win_hh:
+            return False
+
+        # Internal seat cradling 27.0 x 27.0 mm OLED PCB
+        if 0.9 <= z < 3.6 and abs(x) <= oled_hw and abs(y) <= oled_hh:
+            in_tl = (x < -hw + 3.8) and (abs(y - NOM_BTN_OFFSET_Y) <= 3.6) and (z >= 1.8)
+            in_bl = (x < -hw + 3.8) and (abs(y + NOM_BTN_OFFSET_Y) <= 3.6) and (z >= 1.8)
+            in_br = (x > hw - 3.8) and (abs(y + NOM_BTN_OFFSET_Y) <= 3.6) and (z >= 1.8)
+            if not (in_tl or in_bl or in_br):
                 return False
 
-    if z >= 3.6:
-        # Upper ring frame + 3 side micro-switch housings
-        inner_keep_x = hw - 2.2
-        inner_keep_y = hh - 2.2
-        in_tl_boss = (x < -hw + 4.0) and (abs(y - BTN_Y_OFFSET) <= 3.6)
-        in_bl_boss = (x < -hw + 4.0) and (abs(y + BTN_Y_OFFSET) <= 3.6)
-        in_br_boss = (x > hw - 4.0) and (abs(y + BTN_Y_OFFSET) <= 3.6)
-        if abs(x) <= inner_keep_x and abs(y) <= inner_keep_y:
-            if not (in_tl_boss or in_bl_boss or in_br_boss):
+        if z >= 3.6:
+            in_tl = (x < -hw + 4.0) and (abs(y - NOM_BTN_OFFSET_Y) <= 3.6)
+            in_bl = (x < -hw + 4.0) and (abs(y + NOM_BTN_OFFSET_Y) <= 3.6)
+            in_br = (x > hw - 4.0) and (abs(y + NOM_BTN_OFFSET_Y) <= 3.6)
+            if abs(x) <= (hw - 2.2) and abs(y) <= (hh - 2.2) and not (in_tl or in_bl or in_br):
                 return False
 
-    # Cut the 3 side-push micro-switch pockets (3x4x2mm switches) + wire lead slots
-    if z >= 1.8:
-        # Top-Left button (X negative, Y = +8.0)
-        if x <= (-hw + 3.0) and abs(y - BTN_Y_OFFSET) <= 2.2:
-            return False
-        if x <= (-hw + 4.2) and abs(y - BTN_Y_OFFSET) <= 1.1:
-            return False
-        # Bottom-Left button (X negative, Y = -8.0)
-        if x <= (-hw + 3.0) and abs(y + BTN_Y_OFFSET) <= 2.2:
-            return False
-        if x <= (-hw + 4.2) and abs(y + BTN_Y_OFFSET) <= 1.1:
-            return False
-        # Bottom-Right button (X positive, Y = -8.0)
-        if x >= (hw - 3.0) and abs(y + BTN_Y_OFFSET) <= 2.2:
-            return False
-        if x >= (hw - 4.2) and abs(y + BTN_Y_OFFSET) <= 1.1:
-            return False
-
-    return True
-
-
-# ---- 2. Solid Definition: Raised-Belly Counterbored Backplate ----
-# z = 0.0 sits flat against the Casio case rim & factory rubber O-ring gasket;
-# z = 5.2 is the exterior top of the raised center dome (+4.0 mm internal cavity).
-BACKPLATE_Z_PLANES = [0.0, EAR_TAB_THICKNESS, 1.3, 4.0, 5.2]
-
-
-def backplate_solid(x: float, y: float, z: float) -> bool:
-    sx = SCREW_SPAN_X * 0.5  # 11.0 mm
-    sy = SCREW_SPAN_Y * 0.5  # 16.5 mm
-
-    # 4 corner screw holes (through all layers) & screwdriver counterbores (above 0.85 mm)
-    for cx in (-sx, sx):
-        for cy in (-sy, sy):
-            if _in_circle(x, y, cx, cy, SCREW_THROUGH_R):
+        # 3 side-push micro-switch pockets positioned at exact nominal Y = +/- 8.0 mm
+        if z >= 1.8:
+            if x <= (-hw + sw_depth) and abs(y - NOM_BTN_OFFSET_Y) <= sw_half_w:
                 return False
-            if z >= EAR_TAB_THICKNESS and _in_circle(x, y, cx, cy, SCREW_CBORE_R):
+            if x <= (-hw + sw_depth + 1.2) and abs(y - NOM_BTN_OFFSET_Y) <= 1.1:
+                return False
+            if x <= (-hw + sw_depth) and abs(y + NOM_BTN_OFFSET_Y) <= sw_half_w:
+                return False
+            if x <= (-hw + sw_depth + 1.2) and abs(y + NOM_BTN_OFFSET_Y) <= 1.1:
+                return False
+            if x >= (hw - sw_depth) and abs(y + NOM_BTN_OFFSET_Y) <= sw_half_w:
+                return False
+            if x >= (hw - sw_depth - 1.2) and abs(y + NOM_BTN_OFFSET_Y) <= 1.1:
                 return False
 
-    # Base sealing flange (z < 1.3 mm): covers factory O-ring track + 4 corner screw ears
-    in_flange = _in_chamfered_rect(x, y, 18.2, 16.4, chamfer=5.2)
-    for cx in (-sx, sx):
-        for cy in (-sy, sy):
-            if _in_circle(x, y, cx, cy, 2.55):
-                in_flange = True
-            # Smooth bridge connecting ear to main flange
-            if abs(x - cx) <= 2.55 and abs(y) <= sy:
-                in_flange = True
+        return True
 
-    # Raised center belly dome (z = 1.3..5.2 mm): stays clear of screw counterbores
-    in_dome = _in_chamfered_rect(x, y, 16.8, 14.8, chamfer=4.2)
+    return solid
 
-    if z < 1.3:
-        if not in_flange:
+
+def make_backplate_solid(clearance_per_side: float) -> Callable[[float, float, float], bool]:
+    c = clearance_per_side
+    # Positional screw datums stay at EXACT nominal (never add clearance to center spacing!)
+    sx = NOM_SCREW_SPAN_X * 0.5  # 11.0 mm
+    sy = NOM_SCREW_SPAN_Y * 0.5  # 16.5 mm
+
+    # Internal holes expand by +c on radius (+2*c on diameter)
+    screw_r = (NOM_SCREW_SHAFT_D * 0.5) + c
+    cbore_r = (NOM_SCREW_DRIVER_D * 0.5) + c
+    usbc_half_w = (NOM_USBC_PLUG_W * 0.5) + c
+
+    def solid(x: float, y: float, z: float) -> bool:
+        for cx in (-sx, sx):
+            for cy in (-sy, sy):
+                if _in_circle(x, y, cx, cy, screw_r):
+                    return False
+                if z >= NOM_EAR_THICKNESS and _in_circle(x, y, cx, cy, cbore_r):
+                    return False
+
+        in_flange = _in_chamfered_rect(x, y, 18.2, 16.4, chamfer=5.2)
+        for cx in (-sx, sx):
+            for cy in (-sy, sy):
+                if _in_circle(x, y, cx, cy, 2.5):
+                    in_flange = True
+                if abs(x - cx) <= 2.5 and abs(y) <= sy:
+                    in_flange = True
+
+        in_dome = _in_chamfered_rect(x, y, 16.8, 14.8, chamfer=4.2)
+        if z < 1.3:
+            if not in_flange:
+                return False
+        else:
+            if not in_dome:
+                return False
+
+        if z < 4.0 and _in_chamfered_rect(x, y, 15.1, 13.3, chamfer=3.4):
             return False
-    else:
-        if not in_dome:
+
+        if NOM_EAR_THICKNESS <= z < 4.0 and x > 14.0 and abs(y) <= usbc_half_w:
             return False
 
-    # Hollow internal battery/XIAO cavity (z = 0.0..4.0 mm -> 1.2 mm solid roof above z=4.0)
-    if z < 4.0:
-        if _in_chamfered_rect(x, y, 15.1, 13.3, chamfer=3.4):
-            return False
+        return True
 
-    # Plugged USB-C charging & sync port cutout on +X dome wall (9.2 mm wide x 3.2 mm tall)
-    if 0.85 <= z < 4.0:
-        if x > 14.0 and abs(y) <= 4.6:
-            return False
-
-    return True
+    return solid
 
 
-# ---- Greedy-Meshed Exact Z-Slab Binary STL Compiler ----
 def _greedy_quads_2d(mask: List[List[bool]], nx: int, ny: int) -> List[Tuple[int, int, int, int]]:
-    """Merge contiguous True cells in an `nx x ny` boolean grid into maximal rectangles."""
     used = [[False] * ny for _ in range(nx)]
     rects: List[Tuple[int, int, int, int]] = []
     for i in range(nx):
@@ -209,17 +213,17 @@ def compile_z_slab_stl(
     y_min: float,
     y_max: float,
     z_planes: Sequence[float],
-    xy_step: float = 0.2,
+    xy_step: float = 0.1,
 ) -> List[Triangle]:
-    """Compile a 2.5D Z-slab CSG solid into a watertight, greedy-merged triangle list."""
+    """Compile a 2.5D Z-slab CSG solid on an exact symmetric `0.1 mm` grid."""
     nx = int(round((x_max - x_min) / xy_step))
     ny = int(round((y_max - y_min) / xy_step))
     nz = len(z_planes) - 1
 
-    xs = [x_min + i * xy_step for i in range(nx + 1)]
-    ys = [y_min + j * xy_step for j in range(ny + 1)]
+    # Symmetric grid coordinates aligned to exact 0.1 mm boundaries
+    xs = [round(x_min + i * xy_step, 4) for i in range(nx + 1)]
+    ys = [round(y_min + j * xy_step, 4) for j in range(ny + 1)]
 
-    # Evaluate occupancy [iz][ix][iy] at slab midpoints
     occ: List[List[List[bool]]] = []
     for k in range(nz):
         zm = 0.5 * (z_planes[k] + z_planes[k + 1])
@@ -241,10 +245,8 @@ def compile_z_slab_stl(
         tris.append((n, p0, p1, p2))
         tris.append((n, p0, p2, p3))
 
-    # 1. Horizontal faces (-Z and +Z) at each z_planes[k]
     for k in range(nz + 1):
         z = z_planes[k]
-        # +Z upward face: k-1 is solid, k is empty
         if k > 0:
             up_mask = [
                 [occ[k - 1][i][j] and (k == nz or not occ[k][i][j]) for j in range(ny)]
@@ -258,7 +260,6 @@ def compile_z_slab_stl(
                     (xs[i1], ys[j1], z),
                     (xs[i0], ys[j1], z),
                 )
-        # -Z downward face: k is solid, k-1 is empty
         if k < nz:
             dn_mask = [
                 [occ[k][i][j] and (k == 0 or not occ[k - 1][i][j]) for j in range(ny)]
@@ -273,7 +274,6 @@ def compile_z_slab_stl(
                     (xs[i1], ys[j0], z),
                 )
 
-    # 2. Vertical X-normal faces (-X and +X) per Z-slab, greedy-merged along Y
     for k in range(nz):
         z0, z1 = z_planes[k], z_planes[k + 1]
         for i in range(nx + 1):
@@ -293,7 +293,7 @@ def compile_z_slab_stl(
                         j_end += 1
                     else:
                         break
-                if left_s and not right_s:  # +X normal
+                if left_s and not right_s:
                     add_quad(
                         (1.0, 0.0, 0.0),
                         (x, ys[j], z0),
@@ -301,7 +301,7 @@ def compile_z_slab_stl(
                         (x, ys[j_end], z1),
                         (x, ys[j], z1),
                     )
-                else:  # -X normal
+                else:
                     add_quad(
                         (-1.0, 0.0, 0.0),
                         (x, ys[j], z0),
@@ -311,7 +311,6 @@ def compile_z_slab_stl(
                     )
                 j = j_end
 
-    # 3. Vertical Y-normal faces (-Y and +Y) per Z-slab, greedy-merged along X
     for k in range(nz):
         z0, z1 = z_planes[k], z_planes[k + 1]
         for j in range(ny + 1):
@@ -331,7 +330,7 @@ def compile_z_slab_stl(
                         i_end += 1
                     else:
                         break
-                if bot_s and not top_s:  # +Y normal
+                if bot_s and not top_s:
                     add_quad(
                         (0.0, 1.0, 0.0),
                         (xs[i], y, z0),
@@ -339,7 +338,7 @@ def compile_z_slab_stl(
                         (xs[i_end], y, z1),
                         (xs[i_end], y, z0),
                     )
-                else:  # -Y normal
+                else:
                     add_quad(
                         (0.0, -1.0, 0.0),
                         (xs[i], y, z0),
@@ -362,23 +361,35 @@ def write_binary_stl(path: Path, triangles: Sequence[Triangle], label: str) -> N
     path.write_bytes(b"".join(chunks))
 
 
-def build_all_stl_files(output_dir: Path, xy_step: float = 0.2) -> Tuple[Path, Path]:
+def build_all_stl_files(
+    output_dir: Path, process: str = "fdm", xy_step: float = 0.1
+) -> Tuple[Path, Path]:
+    c = PROCESS_CLEARANCE_MM[process]
     cradle_tris = compile_z_slab_stl(
-        cradle_solid, -16.0, 16.0, -15.0, 15.0, CRADLE_Z_PLANES, xy_step=xy_step
+        make_cradle_solid(c), -16.0, 16.0, -15.0, 15.0, CRADLE_Z_PLANES, xy_step=xy_step
     )
     backplate_tris = compile_z_slab_stl(
-        backplate_solid, -19.0, 19.0, -20.0, 20.0, BACKPLATE_Z_PLANES, xy_step=xy_step
+        make_backplate_solid(c), -20.0, 20.0, -20.0, 20.0, BACKPLATE_Z_PLANES, xy_step=xy_step
     )
 
     cradle_path = output_dir / "w218h_inner_cradle.stl"
     backplate_path = output_dir / "w218h_backplate.stl"
-    write_binary_stl(cradle_path, cradle_tris, "Gummybear Casio W-218H Inner Cradle")
-    write_binary_stl(backplate_path, backplate_tris, "Gummybear Casio W-218H Backplate")
+    write_binary_stl(cradle_path, cradle_tris, f"Gummybear W-218H Cradle ({process.upper()}, c={c}mm)")
+    write_binary_stl(backplate_path, backplate_tris, f"Gummybear W-218H Backplate ({process.upper()}, c={c}mm)")
     return cradle_path, backplate_path
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Generate W-218H 3D-printable STL meshes.")
+    parser.add_argument(
+        "--process",
+        choices=["fdm", "sla"],
+        default="fdm",
+        help="Printer process preset: 'sla' (c=0.1mm/side resin) or 'fdm' (c=0.2mm/side filament)",
+    )
+    args = parser.parse_args()
     out = Path(__file__).resolve().parent / "output"
-    c_path, b_path = build_all_stl_files(out, xy_step=0.15)
-    print(f"Generated {c_path} ({c_path.stat().st_size / 1024:.1f} KB)")
-    print(f"Generated {b_path} ({b_path.stat().st_size / 1024:.1f} KB)")
+    c_path, b_path = build_all_stl_files(out, process=args.process, xy_step=0.1)
+    print(f"[{args.process.upper()} c={PROCESS_CLEARANCE_MM[args.process]}mm/side] Generated:")
+    print(f"  {c_path} ({c_path.stat().st_size / 1024:.1f} KB)")
+    print(f"  {b_path} ({b_path.stat().st_size / 1024:.1f} KB)")
